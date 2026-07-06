@@ -295,7 +295,7 @@ def list_amcs(month: Optional[str] = None, registrar: Optional[str] = None):
     if not month:
         month = q1("SELECT MAX(month) as m FROM amc_monthly")["m"]
 
-    filters = ["s.month = %s"]
+    filters = ["am.month = %s"]
     params = [month]
     if registrar:
         filters.append("am.registrar = %s")
