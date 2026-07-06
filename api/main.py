@@ -137,7 +137,9 @@ def dashboard_top_schemes(month: Optional[str] = None, limit: int = 5):
     if not month:
         month = q1("SELECT MAX(month) as m FROM scheme_monthly")["m"]
     return q("""
-        SELECT scheme_code, scheme_name, amc_name,
+        SELECT scheme_code,
+               COALESCE(NULLIF(scheme_name, ''), scheme_code || ' (' || amc_name || ')') AS scheme_name,
+               amc_name,
                ROUND(SUM(brokerage)::numeric, 2)      AS brokerage,
                ROUND(AVG(weighted_rate)::numeric, 4)  AS avg_rate
         FROM scheme_monthly WHERE month = %s
@@ -252,7 +254,9 @@ def reconciliation_scheme(
 
     return q(f"""
         SELECT
-            sm.scheme_code, sm.scheme_name, sm.amc_name, sm.amc_code,
+            sm.scheme_code,
+            COALESCE(NULLIF(sm.scheme_name, ''), sm.scheme_code || ' (' || sm.amc_name || ')') AS scheme_name,
+            sm.amc_name, sm.amc_code,
             sm.month,
             ROUND(sm.weighted_rate::numeric, 4)           AS actual_rate,
             ROUND(cr.committed_rate::numeric, 4)          AS committed_rate,
@@ -347,7 +351,8 @@ def amc_detail(amc_code: str):
     """, [amc_code])
 
     schemes = q("""
-        SELECT scheme_code, scheme_name,
+        SELECT scheme_code,
+               COALESCE(NULLIF(scheme_name, ''), scheme_code) AS scheme_name,
                ROUND(SUM(brokerage)::numeric, 2)                                        AS brokerage,
                ROUND(SUM(brokerage*weighted_rate)/NULLIF(SUM(brokerage),0)::numeric, 4) AS avg_rate,
                SUM(investors)                                                            AS investors
