@@ -75,17 +75,16 @@ def dashboard_kpis(month: Optional[str] = None):
 
     committed_row = q1("""
         SELECT
-            ROUND(SUM(sm.brokerage)::numeric, 2) AS verified_actual,
-            ROUND(SUM(sm.brokerage * cr.committed_rate / NULLIF(sm.weighted_rate,0))::numeric, 2) AS expected_brokerage
-        FROM scheme_monthly sm
-        JOIN committed_rates cr ON cr.scheme_code = sm.scheme_code AND cr.amc_code = sm.amc_code
-        WHERE sm.month = %s
-          AND sm.weighted_rate > 0
+            ROUND(SUM(brokerage_amt)::numeric, 2) AS verified_actual,
+            ROUND(SUM(brokerage_amt + shortfall_rupees)::numeric, 2) AS expected_brokerage,
+            ROUND(SUM(shortfall_rupees)::numeric, 2) AS total_shortfall
+        FROM reconciliation_verified_scheme_month
+        WHERE month = %s
     """, [month])
 
     actual = float(committed_row.get("verified_actual") or 0)
     expected = float(committed_row.get("expected_brokerage") or actual)
-    gap = round(expected - actual, 2)
+    gap = float(committed_row.get("total_shortfall") or 0)
     gap_pct = round((gap / expected * 100) if expected else 0, 2)
 
     schemes = q1("SELECT COUNT(DISTINCT scheme_code) AS c FROM scheme_monthly WHERE month = %s", [month])
@@ -196,42 +195,41 @@ def reconciliation_amc(
     registrar: Optional[str] = None,
     min_gap_pct: float = 0
 ):
-    """AMC-level actual vs committed reconciliation."""
+    """AMC-level actual vs committed reconciliation.
+    Rolled up from reconciliation_verified_scheme_month (raw records,
+    year-band aware, correct split-payment handling)."""
     if not month:
-        month = q1("SELECT MAX(month) as m FROM amc_monthly")["m"]
+        month = q1("SELECT MAX(month) as m FROM reconciliation_verified_scheme_month")["m"]
 
-    filters = ["s.month = %s"]
+    filters = ["v.month = %s"]
     params = [month]
     if registrar:
-        filters.append("am.registrar = %s")
+        filters.append("v.registrar = %s")
         params.append(registrar)
 
     where = " AND ".join(filters)
 
     return q(f"""
         SELECT
-            sm.amc_code, sm.amc_name, sm.registrar, sm.month,
-            ROUND(sm.actual_rate::numeric, 4)             AS actual_rate,
-            ROUND(sm.committed_rate::numeric, 4)          AS committed_rate,
-            sm.rate_type,
-            ROUND((sm.actual_rate - sm.committed_rate)::numeric, 4)  AS rate_gap,
-            ROUND(((sm.actual_rate - sm.committed_rate)/NULLIF(sm.committed_rate,0)*100)::numeric, 2) AS gap_pct,
-            ROUND(sm.brokerage::numeric, 2)               AS actual_brokerage,
-            ROUND((sm.brokerage * sm.committed_rate / NULLIF(sm.actual_rate,0))::numeric, 2) AS expected_brokerage,
-            ROUND((sm.brokerage - sm.brokerage * sm.committed_rate / NULLIF(sm.actual_rate,0))::numeric, 2) AS brokerage_gap
+            amc_code, amc_name, registrar, month,
+            ROUND(wtd_actual_rate::numeric, 4)      AS actual_rate,
+            ROUND(committed_rate_blend::numeric, 4) AS committed_rate,
+            ROUND((wtd_actual_rate - committed_rate_blend)::numeric, 4) AS rate_gap,
+            ROUND(((wtd_actual_rate - committed_rate_blend)/NULLIF(committed_rate_blend,0)*100)::numeric, 2) AS gap_pct,
+            ROUND(brokerage::numeric, 2) AS actual_brokerage,
+            ROUND(shortfall_total::numeric, 2) AS shortfall_rupees
         FROM (
-            SELECT s.amc_code, s.amc_name, s.registrar, s.month,
-                   SUM(s.brokerage) AS brokerage,
-                   SUM(s.brokerage * s.weighted_rate)/NULLIF(SUM(s.brokerage),0) AS actual_rate,
-                   AVG(cr.committed_rate) AS committed_rate,
-                   MAX(cr.rate_type) AS rate_type
-            FROM scheme_monthly s
-            JOIN committed_rates cr ON cr.scheme_code = s.scheme_code AND cr.amc_code = s.amc_code
+            SELECT v.amc_code, v.amc_name, v.registrar, v.month,
+                   SUM(v.brokerage_amt) AS brokerage,
+                   SUM(v.brokerage_amt * v.wtd_actual_rate) / NULLIF(SUM(v.brokerage_amt),0) AS wtd_actual_rate,
+                   SUM(v.brokerage_amt * v.committed_rate_blend) / NULLIF(SUM(v.brokerage_amt),0) AS committed_rate_blend,
+                   SUM(v.shortfall_rupees) AS shortfall_total
+            FROM reconciliation_verified_scheme_month v
             WHERE {where}
-            GROUP BY s.amc_code, s.amc_name, s.registrar, s.month
-        ) sm
-        WHERE ABS((sm.actual_rate - COALESCE(sm.committed_rate,0))/NULLIF(COALESCE(sm.committed_rate,0),0)*100) >= %s
-        ORDER BY rate_gap ASC
+            GROUP BY v.amc_code, v.amc_name, v.registrar, v.month
+        ) rolled
+        WHERE ABS((wtd_actual_rate - COALESCE(committed_rate_blend,0))/NULLIF(COALESCE(committed_rate_blend,0),0)*100) >= %s
+        ORDER BY shortfall_total DESC
     """, params + [min_gap_pct])
 
 @app.get("/reconciliation/scheme")
@@ -240,38 +238,37 @@ def reconciliation_scheme(
     amc_code: Optional[str] = None,
     min_gap_pct: float = 0
 ):
-    """Scheme-level actual vs committed reconciliation."""
+    """Scheme-level actual vs committed reconciliation.
+    Reads from reconciliation_verified_scheme_month — built directly from
+    raw brokerage_records with year-band-aware committed rates and correct
+    split-payment handling, instead of the blended scheme_monthly table."""
     if not month:
-        month = q1("SELECT MAX(month) as m FROM scheme_monthly")["m"]
+        month = q1("SELECT MAX(month) as m FROM reconciliation_verified_scheme_month")["m"]
 
-    filters = ["sm.month = %s"]
+    filters = ["v.month = %s"]
     params = [month]
     if amc_code:
-        filters.append("sm.amc_code = %s")
+        filters.append("v.amc_code = %s")
         params.append(amc_code)
 
     where = " AND ".join(filters)
 
     return q(f"""
         SELECT
-            sm.scheme_code,
-            COALESCE(NULLIF(sm.scheme_name, ''), sm.scheme_code || ' (' || sm.amc_name || ')') AS scheme_name,
-            sm.amc_name, sm.amc_code,
-            sm.month,
-            ROUND(sm.weighted_rate::numeric, 4)           AS actual_rate,
-            ROUND(cr.committed_rate::numeric, 4)          AS committed_rate,
-            cr.rate_type,
-            ROUND((sm.weighted_rate - cr.committed_rate)::numeric, 4)  AS rate_gap,
-            ROUND(((sm.weighted_rate - COALESCE(cr.committed_rate,0))/
-                   NULLIF(cr.committed_rate,0)*100)::numeric, 2)       AS gap_pct,
-            ROUND(sm.brokerage::numeric, 2)               AS actual_brokerage,
-            sm.investors
-        FROM scheme_monthly sm
-        LEFT JOIN committed_rates cr ON cr.scheme_code = sm.scheme_code AND cr.amc_code = sm.amc_code
+            v.scheme_code, v.scheme_name, v.amc_name, v.amc_code, v.month,
+            ROUND(v.wtd_actual_rate::numeric, 4)      AS actual_rate,
+            ROUND(v.committed_rate_blend::numeric, 4) AS committed_rate,
+            ROUND(v.deviation_pct::numeric, 2)        AS gap_pct,
+            ROUND(v.brokerage_amt::numeric, 2)        AS actual_brokerage,
+            v.folios                                  AS investors,
+            v.ok_count, v.bonus_count, v.investigate_count,
+            ROUND(v.shortfall_rupees::numeric, 2)     AS shortfall_rupees
+        FROM reconciliation_verified_scheme_month v
         WHERE {where}
-        ORDER BY rate_gap ASC
+          AND ABS(v.deviation_pct) >= %s
+        ORDER BY v.shortfall_rupees DESC
         LIMIT 200
-    """, params)
+    """, params + [min_gap_pct])
 
 @app.get("/reconciliation/period-summary")
 def reconciliation_period_summary():
