@@ -73,17 +73,18 @@ def dashboard_kpis(month: Optional[str] = None):
         WHERE month = %s
     """, [month])
 
-    committed = q1("""
-        SELECT ROUND(SUM(sm.brokerage * cr.committed_rate / NULLIF(sm.weighted_rate,0))::numeric, 2)
-               AS expected_brokerage
+    committed_row = q1("""
+        SELECT
+            ROUND(SUM(sm.brokerage)::numeric, 2) AS verified_actual,
+            ROUND(SUM(sm.brokerage * cr.committed_rate / NULLIF(sm.weighted_rate,0))::numeric, 2) AS expected_brokerage
         FROM scheme_monthly sm
         JOIN committed_rates cr ON cr.scheme_code = sm.scheme_code AND cr.amc_code = sm.amc_code
         WHERE sm.month = %s
           AND sm.weighted_rate > 0
     """, [month])
 
-    actual = float(kpis.get("actual_brokerage") or 0)
-    expected = float(committed.get("expected_brokerage") or actual)
+    actual = float(committed_row.get("verified_actual") or 0)
+    expected = float(committed_row.get("expected_brokerage") or actual)
     gap = round(expected - actual, 2)
     gap_pct = round((gap / expected * 100) if expected else 0, 2)
 
