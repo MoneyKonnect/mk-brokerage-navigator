@@ -225,7 +225,7 @@ def reconciliation_amc(
             GROUP BY amc_code, amc_name, registrar, month
         ) am
         LEFT JOIN committed_rates cr ON cr.amc_code = am.amc_code AND cr.scheme_code IS NULL
-        WHERE ABS((am.avg_rate - COALESCE(cr.committed_rate,0))/NULLIF(COALESCE(cr.committed_rate,0),1)*100) >= %s
+        WHERE ABS((am.avg_rate - COALESCE(cr.committed_rate,0))/NULLIF(COALESCE(cr.committed_rate,0),0)*100) >= %s
         ORDER BY rate_gap ASC
     """, params + [min_gap_pct])
 

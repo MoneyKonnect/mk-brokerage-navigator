@@ -1,200 +1,148 @@
 """
-migrate_to_supabase.py
-Migrates all data from summary.db to Supabase PostgreSQL.
-Creates tables, loads data, creates indexes, verifies counts.
+migrate_to_supabase.py — Migrate records.db + summary.db (SQLite) to Supabase Postgres
 
 Run: python3 migrate_to_supabase.py
+
+Requires: pip install psycopg2-binary --break-system-packages
 """
 
 import sqlite3
 import psycopg2
-import pandas as pd
 from psycopg2.extras import execute_values
+import sys
 
-SQLITE_PATH = "./data/summary.db"
-PG_CONN_STR = "postgresql://postgres:won72YxOpyf052qS@db.wlbyhcrdtzxamduwzuss.supabase.co:5432/postgres"
+SUPABASE_URL = "postgresql://postgres.wlbyhcrdtzxamduwzuss:XcLLfBEaMorD415g@aws-1-ap-south-1.pooler.supabase.com:6543/postgres"
 
-def get_pg():
-    return psycopg2.connect(PG_CONN_STR)
+SQLITE_RECORDS_DB = "data/records.db"
+SQLITE_SUMMARY_DB = "data/summary.db"
 
-def get_sqlite():
-    return sqlite3.connect(SQLITE_PATH)
+BATCH_SIZE = 5000
 
-# ── Schema ────────────────────────────────────────────────────────────────────
-SCHEMA = """
 
-DROP TABLE IF EXISTS committed_rates CASCADE;
-DROP TABLE IF EXISTS clawbacks CASCADE;
-DROP TABLE IF EXISTS investor_scheme_monthly CASCADE;
-DROP TABLE IF EXISTS scheme_monthly CASCADE;
-DROP TABLE IF EXISTS amc_monthly CASCADE;
+def get_sqlite_schema(conn, table_name):
+    """Get column names and types from SQLite table."""
+    cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table_name})")
+    return cur.fetchall()  # (cid, name, type, notnull, dflt_value, pk)
 
-CREATE TABLE amc_monthly (
-    id              SERIAL PRIMARY KEY,
-    registrar       TEXT,
-    amc_code        TEXT,
-    amc_name        TEXT,
-    month           TEXT,
-    brokerage_head  TEXT,
-    records         INTEGER,
-    investors       INTEGER,
-    schemes         INTEGER,
-    brokerage       NUMERIC(14,2),
-    avg_rate        NUMERIC(8,4),
-    min_rate        NUMERIC(8,4),
-    max_rate        NUMERIC(8,4)
-);
 
-CREATE TABLE scheme_monthly (
-    id              SERIAL PRIMARY KEY,
-    registrar       TEXT,
-    amc_code        TEXT,
-    amc_name        TEXT,
-    scheme_code     TEXT,
-    scheme_name     TEXT,
-    month           TEXT,
-    investors       INTEGER,
-    brokerage       NUMERIC(14,2),
-    aum_sum         NUMERIC(18,2),
-    weighted_rate   NUMERIC(8,4)
-);
+def sqlite_type_to_pg(sqlite_type):
+    """Map SQLite column type to Postgres type."""
+    t = (sqlite_type or "").upper()
+    if "INT" in t:
+        return "BIGINT"
+    if "REAL" in t or "FLOA" in t or "DOUB" in t:
+        return "DOUBLE PRECISION"
+    if "TEXT" in t or "CHAR" in t or "CLOB" in t:
+        return "TEXT"
+    if "BLOB" in t:
+        return "BYTEA"
+    return "TEXT"
 
-CREATE TABLE investor_scheme_monthly (
-    id              SERIAL PRIMARY KEY,
-    registrar       TEXT,
-    amc_code        TEXT,
-    scheme_code     TEXT,
-    folio_no        TEXT,
-    investor_name   TEXT,
-    investor_pan    TEXT,
-    month           TEXT,
-    brokerage_head  TEXT,
-    brokerage       NUMERIC(14,2),
-    aum_sum         NUMERIC(18,2),
-    weighted_rate   NUMERIC(8,4),
-    records         INTEGER
-);
 
-CREATE TABLE clawbacks (
-    id              SERIAL PRIMARY KEY,
-    registrar       TEXT,
-    amc_code        TEXT,
-    folio_no        TEXT,
-    investor_name   TEXT,
-    scheme_code     TEXT,
-    period_from     TEXT,
-    period_to       TEXT,
-    brokerage_amt   NUMERIC(14,2),
-    rate            NUMERIC(8,4),
-    aum             NUMERIC(18,2)
-);
+def create_pg_table(pg_conn, table_name, columns):
+    """Create table in Postgres matching SQLite schema."""
+    col_defs = []
+    for cid, name, ctype, notnull, dflt, pk in columns:
+        pg_type = sqlite_type_to_pg(ctype)
+        col_defs.append(f'"{name}" {pg_type}')
+    col_sql = ",\n    ".join(col_defs)
 
-CREATE TABLE committed_rates (
-    id              SERIAL PRIMARY KEY,
-    registrar       TEXT,
-    amc_code        TEXT,
-    amc_name        TEXT,
-    scheme_code     TEXT,
-    scheme_name     TEXT,
-    category        TEXT,
-    committed_rate  NUMERIC(8,4),
-    rate_type       TEXT,
-    valid_from      TEXT,
-    valid_to        TEXT,
-    source          TEXT,
-    notes           TEXT
-);
-"""
-
-# ── Indexes ───────────────────────────────────────────────────────────────────
-INDEXES = """
-CREATE INDEX idx_amc_monthly_month ON amc_monthly(month);
-CREATE INDEX idx_amc_monthly_amc ON amc_monthly(amc_code);
-CREATE INDEX idx_amc_monthly_registrar ON amc_monthly(registrar);
-
-CREATE INDEX idx_scheme_monthly_month ON scheme_monthly(month);
-CREATE INDEX idx_scheme_monthly_amc ON scheme_monthly(amc_code);
-CREATE INDEX idx_scheme_monthly_scheme ON scheme_monthly(scheme_code);
-
-CREATE INDEX idx_ism_month ON investor_scheme_monthly(month);
-CREATE INDEX idx_ism_amc ON investor_scheme_monthly(amc_code);
-CREATE INDEX idx_ism_folio ON investor_scheme_monthly(folio_no);
-CREATE INDEX idx_ism_pan ON investor_scheme_monthly(investor_pan);
-CREATE INDEX idx_ism_investor ON investor_scheme_monthly(investor_name);
-
-CREATE INDEX idx_committed_amc ON committed_rates(amc_code);
-CREATE INDEX idx_committed_scheme ON committed_rates(scheme_code);
-"""
-
-def migrate_table(table, sqlite_conn, pg_conn, chunk_size=1000):
-    print(f"  Loading {table}...", end=" ", flush=True)
-    df = pd.read_sql(f"SELECT * FROM {table}", sqlite_conn)
-
-    # Drop id column — postgres uses SERIAL
-    if 'id' in df.columns:
-        df = df.drop(columns=['id'])
-
-    cols = list(df.columns)
-    col_str = ", ".join(cols)
-    placeholders = "%s"
-
-    total = 0
     cur = pg_conn.cursor()
-
-    for i in range(0, len(df), chunk_size):
-        chunk = df.iloc[i:i+chunk_size]
-        rows = [tuple(None if pd.isna(v) else v for v in row) for row in chunk.values]
-        execute_values(
-            cur,
-            f"INSERT INTO {table} ({col_str}) VALUES %s",
-            rows
-        )
-        total += len(rows)
-
+    cur.execute(f'DROP TABLE IF EXISTS "{table_name}" CASCADE')
+    cur.execute(f'CREATE TABLE "{table_name}" (\n    {col_sql}\n)')
     pg_conn.commit()
-    cur.close()
-    print(f"{total:,} rows ✓")
-    return total
+    print(f"  Created table: {table_name}")
+
+
+def migrate_table(sqlite_conn, pg_conn, table_name):
+    """Copy all rows from SQLite table to Postgres table in batches."""
+    columns = get_sqlite_schema(sqlite_conn, table_name)
+    if not columns:
+        print(f"  Skipping {table_name} — no columns found")
+        return 0
+
+    col_names = [c[1] for c in columns]
+    create_pg_table(pg_conn, table_name, columns)
+
+    sqlite_cur = sqlite_conn.cursor()
+    sqlite_cur.execute(f'SELECT {", ".join(col_names)} FROM "{table_name}"')
+
+    total_rows = 0
+    pg_cur = pg_conn.cursor()
+    quoted_cols = ", ".join(f'"{c}"' for c in col_names)
+    insert_sql = f'INSERT INTO "{table_name}" ({quoted_cols}) VALUES %s'
+
+    while True:
+        rows = sqlite_cur.fetchmany(BATCH_SIZE)
+        if not rows:
+            break
+        execute_values(pg_cur, insert_sql, rows)
+        pg_conn.commit()
+        total_rows += len(rows)
+        print(f"    {table_name}: {total_rows:,} rows migrated", end="\r")
+
+    print(f"    {table_name}: {total_rows:,} rows migrated — done")
+    return total_rows
+
+
+def get_all_tables(conn):
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    return [row[0] for row in cur.fetchall()]
+
+
+def migrate_db(sqlite_path, pg_conn, label):
+    print(f"\n=== Migrating {label} ({sqlite_path}) ===")
+    try:
+        sqlite_conn = sqlite3.connect(sqlite_path)
+    except Exception as e:
+        print(f"  ERROR: could not open {sqlite_path}: {e}")
+        return
+
+    tables = get_all_tables(sqlite_conn)
+    print(f"  Found tables: {tables}")
+
+    for table in tables:
+        try:
+            migrate_table(sqlite_conn, pg_conn, table)
+        except Exception as e:
+            print(f"  ERROR migrating {table}: {e}")
+            pg_conn.rollback()
+
+    sqlite_conn.close()
+
 
 def main():
     print("Connecting to Supabase...")
-    pg = get_pg()
-    print("Connected ✓")
+    try:
+        pg_conn = psycopg2.connect(SUPABASE_URL)
+    except Exception as e:
+        print(f"FATAL: could not connect to Supabase: {e}")
+        sys.exit(1)
+    print("Connected.")
 
-    print("\nCreating schema...")
-    cur = pg.cursor()
-    cur.execute(SCHEMA)
-    pg.commit()
-    cur.close()
-    print("Schema created ✓")
+    migrate_db(SQLITE_RECORDS_DB, pg_conn, "records.db")
+    migrate_db(SQLITE_SUMMARY_DB, pg_conn, "summary.db")
 
-    sqlite = get_sqlite()
+    print("\n=== Verification ===")
+    pg_cur = pg_conn.cursor()
+    pg_cur.execute("""
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public'
+        ORDER BY table_name
+    """)
+    tables = [r[0] for r in pg_cur.fetchall()]
+    print(f"Tables now in Supabase: {tables}")
 
-    print("\nMigrating data:")
-    totals = {}
-    for table in ['amc_monthly', 'scheme_monthly', 'investor_scheme_monthly',
-                  'clawbacks', 'committed_rates']:
-        totals[table] = migrate_table(table, sqlite, pg)
+    for t in tables:
+        pg_cur.execute(f'SELECT COUNT(*) FROM "{t}"')
+        count = pg_cur.fetchone()[0]
+        print(f"  {t}: {count:,} rows")
 
-    print("\nCreating indexes...")
-    cur = pg.cursor()
-    cur.execute(INDEXES)
-    pg.commit()
-    cur.close()
-    print("Indexes created ✓")
-
-    print("\nVerifying row counts:")
-    cur = pg.cursor()
-    for table, expected in totals.items():
-        cur.execute(f"SELECT COUNT(*) FROM {table}")
-        actual = cur.fetchone()[0]
-        status = "✓" if actual == expected else "✗ MISMATCH"
-        print(f"  {table}: {actual:,} rows {status}")
-    cur.close()
-
-    sqlite.close()
-    pg.close()
+    pg_conn.close()
     print("\nMigration complete.")
+
 
 if __name__ == "__main__":
     main()
