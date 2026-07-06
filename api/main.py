@@ -74,13 +74,12 @@ def dashboard_kpis(month: Optional[str] = None):
     """, [month])
 
     committed = q1("""
-        SELECT ROUND(SUM(am.brokerage * cr.committed_rate / NULLIF(am.avg_rate,0))::numeric, 2)
+        SELECT ROUND(SUM(sm.brokerage * cr.committed_rate / NULLIF(sm.weighted_rate,0))::numeric, 2)
                AS expected_brokerage
-        FROM amc_monthly am
-        JOIN committed_rates cr ON cr.amc_code = am.amc_code
-            AND cr.scheme_code IS NULL
-        WHERE am.month = %s
-          AND am.avg_rate > 0
+        FROM scheme_monthly sm
+        JOIN committed_rates cr ON cr.scheme_code = sm.scheme_code
+        WHERE sm.month = %s
+          AND sm.weighted_rate > 0
     """, [month])
 
     actual = float(kpis.get("actual_brokerage") or 0)
@@ -198,7 +197,7 @@ def reconciliation_amc(
     if not month:
         month = q1("SELECT MAX(month) as m FROM amc_monthly")["m"]
 
-    filters = ["am.month = %s"]
+    filters = ["s.month = %s"]
     params = [month]
     if registrar:
         filters.append("am.registrar = %s")
@@ -208,24 +207,27 @@ def reconciliation_amc(
 
     return q(f"""
         SELECT
-            am.amc_code, am.amc_name, am.registrar, am.month,
-            ROUND(am.avg_rate::numeric, 4)                AS actual_rate,
-            ROUND(cr.committed_rate::numeric, 4)          AS committed_rate,
-            cr.rate_type,
-            ROUND((am.avg_rate - cr.committed_rate)::numeric, 4)  AS rate_gap,
-            ROUND(((am.avg_rate - cr.committed_rate)/NULLIF(cr.committed_rate,0)*100)::numeric, 2) AS gap_pct,
-            ROUND(am.brokerage::numeric, 2)               AS actual_brokerage,
-            ROUND((am.brokerage * cr.committed_rate / NULLIF(am.avg_rate,0))::numeric, 2) AS expected_brokerage,
-            ROUND((am.brokerage - am.brokerage * cr.committed_rate / NULLIF(am.avg_rate,0))::numeric, 2) AS brokerage_gap
+            sm.amc_code, sm.amc_name, sm.registrar, sm.month,
+            ROUND(sm.actual_rate::numeric, 4)             AS actual_rate,
+            ROUND(sm.committed_rate::numeric, 4)          AS committed_rate,
+            sm.rate_type,
+            ROUND((sm.actual_rate - sm.committed_rate)::numeric, 4)  AS rate_gap,
+            ROUND(((sm.actual_rate - sm.committed_rate)/NULLIF(sm.committed_rate,0)*100)::numeric, 2) AS gap_pct,
+            ROUND(sm.brokerage::numeric, 2)               AS actual_brokerage,
+            ROUND((sm.brokerage * sm.committed_rate / NULLIF(sm.actual_rate,0))::numeric, 2) AS expected_brokerage,
+            ROUND((sm.brokerage - sm.brokerage * sm.committed_rate / NULLIF(sm.actual_rate,0))::numeric, 2) AS brokerage_gap
         FROM (
-            SELECT amc_code, amc_name, registrar, month,
-                   SUM(brokerage) AS brokerage,
-                   SUM(brokerage * avg_rate)/NULLIF(SUM(brokerage),0) AS avg_rate
-            FROM amc_monthly WHERE {where}
-            GROUP BY amc_code, amc_name, registrar, month
-        ) am
-        LEFT JOIN committed_rates cr ON cr.amc_code = am.amc_code AND cr.scheme_code IS NULL
-        WHERE ABS((am.avg_rate - COALESCE(cr.committed_rate,0))/NULLIF(COALESCE(cr.committed_rate,0),0)*100) >= %s
+            SELECT s.amc_code, s.amc_name, s.registrar, s.month,
+                   SUM(s.brokerage) AS brokerage,
+                   SUM(s.brokerage * s.weighted_rate)/NULLIF(SUM(s.brokerage),0) AS actual_rate,
+                   AVG(cr.committed_rate) AS committed_rate,
+                   MAX(cr.rate_type) AS rate_type
+            FROM scheme_monthly s
+            JOIN committed_rates cr ON cr.scheme_code = s.scheme_code
+            WHERE {where}
+            GROUP BY s.amc_code, s.amc_name, s.registrar, s.month
+        ) sm
+        WHERE ABS((sm.actual_rate - COALESCE(sm.committed_rate,0))/NULLIF(COALESCE(sm.committed_rate,0),0)*100) >= %s
         ORDER BY rate_gap ASC
     """, params + [min_gap_pct])
 
@@ -291,7 +293,7 @@ def list_amcs(month: Optional[str] = None, registrar: Optional[str] = None):
     if not month:
         month = q1("SELECT MAX(month) as m FROM amc_monthly")["m"]
 
-    filters = ["am.month = %s"]
+    filters = ["s.month = %s"]
     params = [month]
     if registrar:
         filters.append("am.registrar = %s")
