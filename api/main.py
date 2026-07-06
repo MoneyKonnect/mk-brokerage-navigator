@@ -77,7 +77,7 @@ def dashboard_kpis(month: Optional[str] = None):
         SELECT ROUND(SUM(sm.brokerage * cr.committed_rate / NULLIF(sm.weighted_rate,0))::numeric, 2)
                AS expected_brokerage
         FROM scheme_monthly sm
-        JOIN committed_rates cr ON cr.scheme_code = sm.scheme_code
+        JOIN committed_rates cr ON cr.scheme_code = sm.scheme_code AND cr.amc_code = sm.amc_code
         WHERE sm.month = %s
           AND sm.weighted_rate > 0
     """, [month])
@@ -223,7 +223,7 @@ def reconciliation_amc(
                    AVG(cr.committed_rate) AS committed_rate,
                    MAX(cr.rate_type) AS rate_type
             FROM scheme_monthly s
-            JOIN committed_rates cr ON cr.scheme_code = s.scheme_code
+            JOIN committed_rates cr ON cr.scheme_code = s.scheme_code AND cr.amc_code = s.amc_code
             WHERE {where}
             GROUP BY s.amc_code, s.amc_name, s.registrar, s.month
         ) sm
@@ -262,7 +262,7 @@ def reconciliation_scheme(
             ROUND(sm.brokerage::numeric, 2)               AS actual_brokerage,
             sm.investors
         FROM scheme_monthly sm
-        LEFT JOIN committed_rates cr ON cr.scheme_code = sm.scheme_code
+        LEFT JOIN committed_rates cr ON cr.scheme_code = sm.scheme_code AND cr.amc_code = sm.amc_code
         WHERE {where}
         ORDER BY rate_gap ASC
         LIMIT 200
