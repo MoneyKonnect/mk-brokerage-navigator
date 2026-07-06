@@ -307,10 +307,10 @@ def list_amcs(month: Optional[str] = None, registrar: Optional[str] = None):
         SELECT
             am.amc_code, am.amc_name, am.registrar,
             ROUND(SUM(am.brokerage)::numeric, 2)          AS monthly_brokerage,
-            ROUND(SUM(am.brokerage * am.avg_rate)/NULLIF(SUM(am.brokerage),0)::numeric, 4) AS avg_rate,
+            ROUND((SUM(am.brokerage * am.avg_rate)/NULLIF(SUM(am.brokerage),0))::numeric, 4) AS avg_rate,
             ROUND(cr.committed_rate::numeric, 4)          AS committed_rate,
             cr.rate_type,
-            ROUND((SUM(am.brokerage * am.avg_rate)/NULLIF(SUM(am.brokerage),0) - cr.committed_rate)::numeric, 4) AS rate_gap,
+            ROUND(((SUM(am.brokerage * am.avg_rate)/NULLIF(SUM(am.brokerage),0)) - cr.committed_rate)::numeric, 4) AS rate_gap,
             SUM(am.investors)                             AS investors,
             SUM(am.schemes)                               AS schemes
         FROM amc_monthly am
@@ -331,7 +331,7 @@ def amc_detail(amc_code: str):
     trend = q("""
         SELECT month,
                ROUND(SUM(brokerage)::numeric, 2)                                    AS brokerage,
-               ROUND(SUM(brokerage*avg_rate)/NULLIF(SUM(brokerage),0)::numeric, 4) AS avg_rate
+               ROUND((SUM(brokerage*avg_rate)/NULLIF(SUM(brokerage),0))::numeric, 4) AS avg_rate
         FROM amc_monthly WHERE amc_code = %s AND month >= '2025-04'
         GROUP BY month ORDER BY month
     """, [amc_code])
@@ -351,7 +351,7 @@ def amc_detail(amc_code: str):
         SELECT scheme_code,
                COALESCE(NULLIF(scheme_name, ''), scheme_code) AS scheme_name,
                ROUND(SUM(brokerage)::numeric, 2)                                        AS brokerage,
-               ROUND(SUM(brokerage*weighted_rate)/NULLIF(SUM(brokerage),0)::numeric, 4) AS avg_rate,
+               ROUND((SUM(brokerage*weighted_rate)/NULLIF(SUM(brokerage),0))::numeric, 4) AS avg_rate,
                SUM(investors)                                                            AS investors
         FROM scheme_monthly WHERE amc_code = %s AND month >= '2025-04'
         GROUP BY scheme_code, scheme_name
@@ -391,7 +391,7 @@ def scheme_detail(scheme_code: str):
     trend = q("""
         SELECT month,
                ROUND(SUM(brokerage)::numeric, 2)                                        AS brokerage,
-               ROUND(SUM(brokerage*weighted_rate)/NULLIF(SUM(brokerage),0)::numeric, 4) AS avg_rate,
+               ROUND((SUM(brokerage*weighted_rate)/NULLIF(SUM(brokerage),0))::numeric, 4) AS avg_rate,
                SUM(investors) AS investors
         FROM scheme_monthly WHERE scheme_code = %s AND month >= '2025-04'
         GROUP BY month ORDER BY month
@@ -406,7 +406,7 @@ def scheme_detail(scheme_code: str):
         SELECT folio_no, investor_name, investor_pan,
                ROUND(SUM(brokerage)::numeric, 2)                                    AS brokerage,
                ROUND(SUM(aum_sum)::numeric, 2)                                      AS aum,
-               ROUND(SUM(brokerage*weighted_rate)/NULLIF(SUM(brokerage),0)::numeric,4) AS avg_rate
+               ROUND((SUM(brokerage*weighted_rate)/NULLIF(SUM(brokerage),0))::numeric,4) AS avg_rate
         FROM investor_scheme_monthly
         WHERE scheme_code = %s AND month >= '2025-04'
         GROUP BY folio_no, investor_name, investor_pan
@@ -446,7 +446,7 @@ def investor_detail(folio_no: str):
                sm.scheme_name, sm.amc_name,
                ROUND(SUM(ism.brokerage)::numeric, 2)                                        AS brokerage,
                ROUND(SUM(ism.aum_sum)::numeric, 2)                                          AS aum,
-               ROUND(SUM(ism.brokerage*ism.weighted_rate)/NULLIF(SUM(ism.brokerage),0)::numeric,4) AS avg_rate
+               ROUND((SUM(ism.brokerage*ism.weighted_rate)/NULLIF(SUM(ism.brokerage),0))::numeric,4) AS avg_rate
         FROM investor_scheme_monthly ism
         LEFT JOIN (
             SELECT DISTINCT ON (scheme_code) scheme_code, scheme_name, amc_name
