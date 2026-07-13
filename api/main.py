@@ -217,6 +217,8 @@ def reconciliation_amc(
             ROUND((wtd_actual_rate - committed_rate_blend)::numeric, 4) AS rate_gap,
             ROUND(((wtd_actual_rate - committed_rate_blend)/NULLIF(committed_rate_blend,0)*100)::numeric, 2) AS gap_pct,
             ROUND(brokerage::numeric, 2) AS actual_brokerage,
+            ROUND((brokerage + shortfall_total)::numeric, 2) AS expected_brokerage,
+            ROUND((-shortfall_total)::numeric, 2) AS brokerage_gap,
             ROUND(shortfall_total::numeric, 2) AS shortfall_rupees
         FROM (
             SELECT v.amc_code, v.amc_name, v.registrar, v.month,
